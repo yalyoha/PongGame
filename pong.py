@@ -5,8 +5,9 @@ PONG (1972) - full-screen remake for Windows 11.
 Two players, Logitech F310 gamepads (X or D switch position both work).
 
 Keys:  ESC quit | F11 / Alt+Enter windowed | P pause | R restart
-       Player 1: W / S      Player 2: Up / Down
-Pads:  left stick or D-pad. START (or SPACE) to serve.
+       Player 1: W A S D           Player 2: arrow keys
+Pads:  left stick or D-pad (both axes). START (or SPACE) to serve.
+       Each paddle is free to move inside its own half of the court.
 """
 
 import array
@@ -139,45 +140,67 @@ class Sfx:
 
 # ------------------------------------------------------------------ players --
 class Player:
-    def __init__(self, side, up_keys, down_keys):
+    def __init__(self, side, up_keys, down_keys, left_keys, right_keys):
         self.side = side                       # 'L' or 'R'
         self.up_keys = up_keys
         self.down_keys = down_keys
+        self.left_keys = left_keys
+        self.right_keys = right_keys
         self.pad = None                        # pygame.joystick.Joystick or None
         self.cpu = False
         self.cpu_bias = 0.0                    # small aiming error, keeps the CPU beatable
         self.score = 0
+        self.x_home = PADDLE_MARGIN if side == 'L' else VW - PADDLE_MARGIN - PADDLE_W
+        # Each paddle roams inside its own half; small gap around the centre line.
+        if side == 'L':
+            self.x_min = 4
+            self.x_max = VW // 2 - PADDLE_W - 4
+        else:
+            self.x_min = VW // 2 + 4
+            self.x_max = VW - PADDLE_W - 4
+        self.x = self.x_home
         self.y = (VH - PADDLE_H) / 2.0
-        self.x = PADDLE_MARGIN if side == 'L' else VW - PADDLE_MARGIN - PADDLE_W
 
     @property
     def rect(self):
         return pygame.Rect(int(self.x), int(self.y), PADDLE_W, PADDLE_H)
 
     def reset(self):
+        self.x = self.x_home
         self.y = (VH - PADDLE_H) / 2.0
         self.score = 0
 
-    def axis(self, keys):
-        """-1 = up, +1 = down."""
-        v = 0.0
+    def axes(self, keys):
+        """Returns (vx, vy) each in [-1, 1]. -1 = up/left, +1 = down/right."""
+        vx = vy = 0.0
         if self.pad is not None:
             try:
                 if self.pad.get_numaxes() > 1:
-                    a = self.pad.get_axis(1)          # left stick Y (X and D mode)
-                    if abs(a) > DEADZONE:
-                        v = (abs(a) - DEADZONE) / (1 - DEADZONE) * (1 if a > 0 else -1)
-                if v == 0.0 and self.pad.get_numhats() > 0:
-                    hy = self.pad.get_hat(0)[1]       # D-pad
-                    v = -float(hy)
+                    ax = self.pad.get_axis(0)         # left stick X
+                    ay = self.pad.get_axis(1)         # left stick Y (X and D mode)
+                    if abs(ax) > DEADZONE:
+                        vx = (abs(ax) - DEADZONE) / (1 - DEADZONE) * (1 if ax > 0 else -1)
+                    if abs(ay) > DEADZONE:
+                        vy = (abs(ay) - DEADZONE) / (1 - DEADZONE) * (1 if ay > 0 else -1)
+                if self.pad.get_numhats() > 0:
+                    hx, hy = self.pad.get_hat(0)      # D-pad
+                    if vx == 0.0:
+                        vx = float(hx)
+                    if vy == 0.0:
+                        vy = -float(hy)
             except Exception:
                 self.pad = None
-        if v == 0.0:
+        if vy == 0.0:
             if any(keys[k] for k in self.up_keys):
-                v = -1.0
+                vy = -1.0
             elif any(keys[k] for k in self.down_keys):
-                v = 1.0
-        return max(-1.0, min(1.0, v))
+                vy = 1.0
+        if vx == 0.0:
+            if any(keys[k] for k in self.left_keys):
+                vx = -1.0
+            elif any(keys[k] for k in self.right_keys):
+                vx = 1.0
+        return (max(-1.0, min(1.0, vx)), max(-1.0, min(1.0, vy)))
 
     def update(self, dt, keys, ball):
         if self.cpu:
@@ -185,11 +208,16 @@ class Player:
             if (self.side == 'R' and ball.vx < 0) or (self.side == 'L' and ball.vx > 0):
                 target = (VH - PADDLE_H) / 2          # idle back to centre
             diff = target - self.y + self.cpu_bias
-            v = max(-1.0, min(1.0, diff / 30.0)) * 0.86
+            vy = max(-1.0, min(1.0, diff / 30.0)) * 0.86
+            # CPU also drifts back to its home column so the human has a fair angle.
+            dx = self.x_home - self.x
+            vx = max(-1.0, min(1.0, dx / 30.0)) * 0.86
         else:
-            v = self.axis(keys)
-        self.y += v * PADDLE_SPEED * dt
+            vx, vy = self.axes(keys)
+        self.y += vy * PADDLE_SPEED * dt
         self.y = max(0.0, min(VH - PADDLE_H, self.y))
+        self.x += vx * PADDLE_SPEED * dt
+        self.x = max(self.x_min, min(self.x_max, self.x))
 
     def rumble(self):
         if self.pad is not None:
@@ -236,8 +264,10 @@ class Game:
         self.sfx = Sfx()
 
         pygame.joystick.init()
-        self.p1 = Player('L', (pygame.K_w,), (pygame.K_s,))
-        self.p2 = Player('R', (pygame.K_UP,), (pygame.K_DOWN,))
+        self.p1 = Player('L', (pygame.K_w,), (pygame.K_s,),
+                         (pygame.K_a,), (pygame.K_d,))
+        self.p2 = Player('R', (pygame.K_UP,), (pygame.K_DOWN,),
+                         (pygame.K_LEFT,), (pygame.K_RIGHT,))
         self.pads = []
         self.refresh_pads()
 
@@ -399,7 +429,7 @@ class Game:
             draw_text(c, "2 - TWO PLAYERS", VW // 2, 240, 3, WHITE, center=True)
             draw_text(c, "START OR SPACE TO PLAY", VW // 2, 290, 3, GREY, center=True)
             draw_text(c, self.pad_names(), VW // 2, 330, 3, GREY, center=True)
-            draw_text(c, "P1 W/S   P2 UP/DOWN   ESC QUIT", VW // 2, 400, 2, GREY, center=True)
+            draw_text(c, "P1 WASD   P2 ARROWS   ESC QUIT", VW // 2, 400, 2, GREY, center=True)
             draw_text(c, "F11 WINDOW   P PAUSE   R MENU", VW // 2, 425, 2, GREY, center=True)
         else:
             self.draw_court()
