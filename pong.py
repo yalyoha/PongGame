@@ -2,19 +2,34 @@
 # -*- coding: utf-8 -*-
 """
 PONG (1972) - full-screen remake for Windows 11.
-Two players, Logitech F310 gamepads (X or D switch position both work).
+Two players. Universal gamepad support via SDL2: Xbox, PlayStation
+(DualShock / DualSense), Switch Pro, Logitech, and any other XInput /
+DirectInput controller SDL recognises. Unknown pads fall back to the
+raw joystick API.
 
 Keys:  ESC quit | F11 / Alt+Enter windowed | P pause | R restart
        Player 1: W A S D           Player 2: arrow keys
-Pads:  left stick or D-pad (both axes). START (or SPACE) to serve.
+Pads:  left stick or D-pad (both axes). START / A / X / Cross to serve.
        Each paddle is free to move inside its own half of the court.
 """
 
 import array
 import math
+import os
 import random
 
 import pygame
+
+# Silence the SDL joystick "background events" warning and allow input to
+# keep flowing even when the game window loses focus for a moment.
+os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")
+
+try:
+    from pygame._sdl2 import controller as sdl_controller
+    HAS_SDL_CONTROLLER = True
+except Exception:
+    sdl_controller = None
+    HAS_SDL_CONTROLLER = False
 
 # ---------------------------------------------------------------- constants --
 VW, VH = 640, 480                 # virtual (game) resolution, 4:3 like the original
@@ -138,6 +153,157 @@ class Sfx:
                 pass
 
 
+# ------------------------------------------------------------------ gamepads -
+# Uniform wrapper around SDL2's high-level Controller API (auto-mapped to an
+# Xbox-360-style layout for any recognised device: Xbox, DualShock/DualSense,
+# Switch Pro, Logitech, Stadia, 8BitDo, etc.) and the raw Joystick fallback
+# for exotic pads SDL doesn't know. Everything the game sees is a Pad object
+# with .lx(), .ly(), .dpad(), .confirm_button(button), .rumble(...).
+
+CONFIRM_BUTTONS = {0, 1, 2, 3, 6, 7, 9, 11}    # A/B/X/Y, BACK, START, misc
+
+
+class ControllerPad:
+    """SDL2 GameController-backed pad. Values already normalised to a
+    standard mapping regardless of the underlying hardware."""
+
+    AXIS_SCALE = 1.0 / 32768.0                # SDL returns int16 for sticks
+
+    def __init__(self, ctrl, instance_id, name):
+        self.ctrl = ctrl
+        self.instance_id = instance_id
+        self.name = name
+
+    @classmethod
+    def try_open(cls, device_index):
+        if not HAS_SDL_CONTROLLER:
+            return None
+        try:
+            if not sdl_controller.is_controller(device_index):
+                return None
+            ctrl = sdl_controller.Controller(device_index)
+            try:
+                inst = ctrl.get_instance_id()
+            except Exception:
+                inst = device_index
+            try:
+                name = ctrl.name or "Controller"
+            except Exception:
+                name = "Controller"
+            return cls(ctrl, inst, name)
+        except Exception:
+            return None
+
+    def _axis(self, index):
+        try:
+            v = self.ctrl.get_axis(index)
+        except Exception:
+            return 0.0
+        # pygame-ce returns int16; older pygame may return float. Handle both.
+        if isinstance(v, float) and -1.5 < v < 1.5:
+            return v
+        return v * self.AXIS_SCALE
+
+    def lx(self):
+        return self._axis(0)                  # CONTROLLER_AXIS_LEFTX
+
+    def ly(self):
+        return self._axis(1)                  # CONTROLLER_AXIS_LEFTY
+
+    def dpad(self):
+        """Returns (dx, dy) with dy positive = down (screen coords)."""
+        try:
+            dx = (1 if self.ctrl.get_button(14) else 0) \
+                 - (1 if self.ctrl.get_button(13) else 0)
+            dy = (1 if self.ctrl.get_button(12) else 0) \
+                 - (1 if self.ctrl.get_button(11) else 0)
+        except Exception:
+            dx = dy = 0
+        return dx, dy
+
+    def rumble(self, low, high, ms):
+        try:
+            self.ctrl.rumble(low, high, ms)
+        except Exception:
+            pass
+
+    def quit(self):
+        try:
+            self.ctrl.quit()
+        except Exception:
+            pass
+
+
+class JoystickPad:
+    """Raw joystick fallback for anything SDL doesn't recognise."""
+
+    def __init__(self, js):
+        self.js = js
+        try:
+            self.instance_id = js.get_instance_id()
+        except Exception:
+            self.instance_id = js.get_id()
+        try:
+            self.name = js.get_name() or "Joystick"
+        except Exception:
+            self.name = "Joystick"
+
+    @classmethod
+    def open(cls, device_index):
+        js = pygame.joystick.Joystick(device_index)
+        try:
+            js.init()
+        except Exception:
+            pass
+        return cls(js)
+
+    def _axis(self, idx):
+        try:
+            if self.js.get_numaxes() > idx:
+                return float(self.js.get_axis(idx))
+        except Exception:
+            pass
+        return 0.0
+
+    def lx(self):
+        return self._axis(0)
+
+    def ly(self):
+        return self._axis(1)
+
+    def dpad(self):
+        try:
+            if self.js.get_numhats() > 0:
+                hx, hy = self.js.get_hat(0)
+                return int(hx), -int(hy)      # SDL hat Y is inverted
+        except Exception:
+            pass
+        return 0, 0
+
+    def rumble(self, low, high, ms):
+        try:
+            self.js.rumble(low, high, ms)
+        except Exception:
+            pass
+
+    def quit(self):
+        try:
+            self.js.quit()
+        except Exception:
+            pass
+
+
+def open_pad(device_index):
+    """Prefer SDL Controller (auto-mapped) then Joystick fallback."""
+    pad = ControllerPad.try_open(device_index)
+    if pad is not None:
+        return pad
+    try:
+        return JoystickPad.open(device_index)
+    except Exception:
+        return None
+
+
 # ------------------------------------------------------------------ players --
 class Player:
     def __init__(self, side, up_keys, down_keys, left_keys, right_keys):
@@ -146,7 +312,7 @@ class Player:
         self.down_keys = down_keys
         self.left_keys = left_keys
         self.right_keys = right_keys
-        self.pad = None                        # pygame.joystick.Joystick or None
+        self.pad = None                        # ControllerPad / JoystickPad
         self.cpu = False
         self.cpu_bias = 0.0                    # small aiming error, keeps the CPU beatable
         self.score = 0
@@ -175,19 +341,17 @@ class Player:
         vx = vy = 0.0
         if self.pad is not None:
             try:
-                if self.pad.get_numaxes() > 1:
-                    ax = self.pad.get_axis(0)         # left stick X
-                    ay = self.pad.get_axis(1)         # left stick Y (X and D mode)
-                    if abs(ax) > DEADZONE:
-                        vx = (abs(ax) - DEADZONE) / (1 - DEADZONE) * (1 if ax > 0 else -1)
-                    if abs(ay) > DEADZONE:
-                        vy = (abs(ay) - DEADZONE) / (1 - DEADZONE) * (1 if ay > 0 else -1)
-                if self.pad.get_numhats() > 0:
-                    hx, hy = self.pad.get_hat(0)      # D-pad
-                    if vx == 0.0:
-                        vx = float(hx)
-                    if vy == 0.0:
-                        vy = -float(hy)
+                ax = self.pad.lx()
+                ay = self.pad.ly()
+                if abs(ax) > DEADZONE:
+                    vx = (abs(ax) - DEADZONE) / (1 - DEADZONE) * (1 if ax > 0 else -1)
+                if abs(ay) > DEADZONE:
+                    vy = (abs(ay) - DEADZONE) / (1 - DEADZONE) * (1 if ay > 0 else -1)
+                hx, hy = self.pad.dpad()
+                if vx == 0.0:
+                    vx = float(hx)
+                if vy == 0.0:
+                    vy = float(hy)
             except Exception:
                 self.pad = None
         if vy == 0.0:
@@ -222,7 +386,7 @@ class Player:
     def rumble(self):
         if self.pad is not None:
             try:
-                self.pad.rumble(0.0, 0.6, 90)         # F710 buzzes, F310 ignores it
+                self.pad.rumble(0.0, 0.6, 90)         # ignored by pads without motors
             except Exception:
                 pass
 
@@ -264,6 +428,11 @@ class Game:
         self.sfx = Sfx()
 
         pygame.joystick.init()
+        if HAS_SDL_CONTROLLER:
+            try:
+                sdl_controller.init()
+            except Exception:
+                pass
         self.p1 = Player('L', (pygame.K_w,), (pygame.K_s,),
                          (pygame.K_a,), (pygame.K_d,))
         self.p2 = Player('R', (pygame.K_UP,), (pygame.K_DOWN,),
@@ -302,18 +471,12 @@ class Game:
     # ---------------------------------------------------------------- input --
     def refresh_pads(self):
         for p in self.pads:
-            try:
-                p.quit()
-            except Exception:
-                pass
+            p.quit()
         self.pads = []
         for i in range(pygame.joystick.get_count()):
-            try:
-                j = pygame.joystick.Joystick(i)
-                j.init()
-                self.pads.append(j)
-            except Exception:
-                pass
+            pad = open_pad(i)
+            if pad is not None:
+                self.pads.append(pad)
         self.p1.pad = self.pads[0] if len(self.pads) > 0 else None
         self.p2.pad = self.pads[1] if len(self.pads) > 1 else None
 
@@ -449,11 +612,16 @@ class Game:
 
     # ----------------------------------------------------------------- loop --
     def confirm_pressed(self, event):
-        """SPACE / ENTER / A, B, START on a pad."""
+        """SPACE / ENTER, or any of A/B/X/Y/BACK/START on a pad
+        (works for both SDL Controller and raw Joystick events)."""
         if event.type == pygame.KEYDOWN:
             return event.key in (pygame.K_SPACE, pygame.K_RETURN, pygame.K_KP_ENTER)
         if event.type == pygame.JOYBUTTONDOWN:
-            return event.button in (0, 1, 6, 7, 9, 11)
+            return event.button in CONFIRM_BUTTONS
+        if hasattr(pygame, "CONTROLLERBUTTONDOWN") \
+                and event.type == pygame.CONTROLLERBUTTONDOWN:
+            # SDL Controller: 0=A 1=B 2=X 3=Y 4=BACK 6=START
+            return event.button in {0, 1, 2, 3, 4, 6}
         return False
 
     def run(self):
@@ -464,6 +632,9 @@ class Game:
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type in (pygame.JOYDEVICEADDED, pygame.JOYDEVICEREMOVED):
+                    self.refresh_pads()
+                elif hasattr(pygame, "CONTROLLERDEVICEADDED") and event.type in (
+                        pygame.CONTROLLERDEVICEADDED, pygame.CONTROLLERDEVICEREMOVED):
                     self.refresh_pads()
                 elif event.type == pygame.KEYDOWN:
                     alt = pygame.key.get_mods() & pygame.KMOD_ALT
