@@ -317,13 +317,15 @@ class Player:
         self.cpu_bias = 0.0                    # small aiming error, keeps the CPU beatable
         self.score = 0
         self.x_home = PADDLE_MARGIN if side == 'L' else VW - PADDLE_MARGIN - PADDLE_W
-        # Each paddle roams inside its own half; small gap around the centre line.
+        # Each paddle roams inside its own half: from the outer screen edge
+        # right up to the centre net (right edge of the L paddle touches the
+        # net, and vice versa for R).
         if side == 'L':
-            self.x_min = 4
-            self.x_max = VW // 2 - PADDLE_W - 4
+            self.x_min = 0
+            self.x_max = VW // 2 - PADDLE_W
         else:
-            self.x_min = VW // 2 + 4
-            self.x_max = VW - PADDLE_W - 4
+            self.x_min = VW // 2
+            self.x_max = VW - PADDLE_W
         self.x = self.x_home
         self.y = (VH - PADDLE_H) / 2.0
 
