@@ -1,11 +1,13 @@
 # PONG
 
-Полноэкранная копия классического PONG 1972 года для Windows 11.
-Два игрока, звук как в оригинальном автомате, и **универсальная поддержка
-геймпадов через SDL2**: Xbox (One / Series / 360), PlayStation
-(DualShock 3/4, DualSense), Nintendo Switch Pro, Logitech, 8BitDo, Stadia,
-Steam Controller и любой другой XInput- или DirectInput-контроллер,
-который умеет SDL.
+Полноэкранный римейк классического PONG 1972 года для Windows 11 —
+с одним важным отличием от оригинала: **ракетки двигаются по обеим осям**
+внутри своей половины корта, а не только вверх-вниз. Звук как в
+оригинальном автомате, счёт до 11 и **универсальная поддержка геймпадов
+через SDL2**: Xbox (One / Series / 360), PlayStation (DualShock 3/4,
+DualSense), Nintendo Switch Pro, Logitech, 8BitDo, Stadia, Steam
+Controller и любой другой XInput- или DirectInput-контроллер, который
+умеет SDL.
 
 ![Оригинал](pong-game.png)
 
