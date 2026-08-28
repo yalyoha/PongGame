@@ -425,6 +425,7 @@ class Game:
 
         self.fullscreen = True
         self.screen = self._make_screen()
+        self._fit_court_to_screen()
         self.canvas = pygame.Surface((VW, VH))
         self.clock = pygame.time.Clock()
         self.sfx = Sfx()
@@ -454,7 +455,26 @@ class Game:
     def _make_screen(self):
         if self.fullscreen:
             return pygame.display.set_mode((0, 0), pygame.FULLSCREEN | pygame.DOUBLEBUF)
-        return pygame.display.set_mode((960, 720), pygame.RESIZABLE | pygame.DOUBLEBUF)
+        # windowed size follows the current court aspect (VW may already be widened)
+        return pygame.display.set_mode(
+            (int(VW * 1.5), int(VH * 1.5)),
+            pygame.RESIZABLE | pygame.DOUBLEBUF,
+        )
+
+    def _fit_court_to_screen(self):
+        """Widen the virtual court so it fills the display's aspect ratio.
+        Classic PONG was 4:3; a modern 16:9 (or wider) monitor otherwise
+        gets black pillars and the paddle stops short of the physical edge.
+        We keep the vertical resolution and stretch VW to match."""
+        global VW
+        sw, sh = self.screen.get_size()
+        if sh <= 0:
+            return
+        needed = int(round(VH * sw / sh))
+        needed = max(640, needed)             # never smaller than the classic 4:3
+        if needed % 2:                        # keep VW even so VW//2 is exact
+            needed += 1
+        VW = needed
 
     def toggle_fullscreen(self):
         self.fullscreen = not self.fullscreen
